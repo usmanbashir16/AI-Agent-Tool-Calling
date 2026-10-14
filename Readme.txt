@@ -1,3 +1,5 @@
+
+
 # AI Agent with Tool Calling & Semantic Memory
 
 A tool-calling AI agent built with Python and Google's Gemini API. The project combines AI-powered conversations, external tools, persistent memory, semantic search, and a React-based web interface with a live agent activity log.
