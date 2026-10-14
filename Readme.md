@@ -1,3 +1,5 @@
+<img width="1907" height="987" alt="image" src="https://github.com/user-attachments/assets/8812f997-4843-459d-a474-e8e2b0790b9c" />
+
 # AI Agent Tool Calling
 
 An AI-powered assistant built with **Google Gemini, Python, FastAPI, React, MCP, SQLite, and ChromaDB**. The project demonstrates how an AI agent can use tools, retrieve information, maintain conversation history, and interact through a web-based chat interface.
