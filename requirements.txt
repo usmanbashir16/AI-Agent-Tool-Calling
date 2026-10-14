@@ -1,0 +1,9 @@
+
+google-genai
+python-dotenv
+chromadb
+sentence-transformers
+fastapi
+uvicorn[standard]
+requests
+ddgs

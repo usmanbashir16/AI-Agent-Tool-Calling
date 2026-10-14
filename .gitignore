@@ -1,0 +1,45 @@
+
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+
+# Local databases and conversation data
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+chroma_db*/
+*.sqlite-journal
+
+# Python virtual environments
+ai-env/
+venv/
+.venv/
+env/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+.pytest_cache/
+.mypy_cache/
+
+# Local model files
+models/
+*.safetensors
+*.pt
+*.pth
