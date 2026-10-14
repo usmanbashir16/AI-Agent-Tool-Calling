@@ -35,8 +35,9 @@ dist/
 
 # Backup files
 # Backup files
-Main_backup--v2.py
 main_backup.py
+Main_backup--v2.py
+*_backup*
 *.bak
 *.backup
 *.old
