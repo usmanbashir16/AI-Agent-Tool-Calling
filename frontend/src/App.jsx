@@ -1,456 +1,639 @@
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8000/chat/stream";
+const API_BASE = "http://127.0.0.1:8000";
 
-const suggestions = [
-  {
-    icon: "🧮",
-    title: "Calculate something",
-    prompt: "Calculate 245 multiplied by 38",
-  },
-  {
-    icon: "🌐",
-    title: "Search the web",
-    prompt: "Search the web for the latest AI news",
-  },
-  {
-    icon: "🧠",
-    title: "Explore my memory",
-    prompt: "What do you remember about me?",
-  },
-];
-
-function formatEvent(event) {
-  const type = (event.type || "activity")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-
-  const details = Object.entries(event)
-    .filter(([key]) => key !== "type")
-    .map(([key, value]) => {
-      const formattedValue =
-        typeof value === "string"
-          ? value
-          : JSON.stringify(value);
-
-      return `${key}: ${formattedValue}`;
-    });
-
-  return {
-    type: event.type || "activity",
-    title: type,
-    details,
-    time: new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }),
-  };
-}
-
-export default function App() {
+function App() {
+  const [conversations, setConversations] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [activities, setActivities] = useState([]);
   const [input, setInput] = useState("");
+
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [backendConnected, setBackendConnected] = useState(false);
   const [error, setError] = useState("");
-  const [sessionCount, setSessionCount] = useState(0);
 
-  async function sendMessage(text = input) {
-    const message = text.trim();
+  const busyRef = useRef(false);
+  const conversationIdRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const activityEndRef = useRef(null);
 
-    if (!message || loading) return;
-
-    setInput("");
-    setError("");
-    setLoading(true);
-
-    setMessages((previous) => [
+  const addActivity = useCallback((message, type = "info") => {
+    setActivities((previous) => [
       ...previous,
-      { role: "user", content: message },
-    ]);
-
-    setActivities([
       {
-        type: "user_message",
-        title: "Message received",
-        details: [message],
+        id: `${Date.now()}-${Math.random()}`,
+        message,
+        type,
         time: new Date().toLocaleTimeString(),
       },
     ]);
+  }, []);
 
-    let finalAnswer = "";
-    let streamError = "";
+  const refreshConversations = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/conversations`);
+
+      if (!response.ok) {
+        throw new Error("Could not load conversations.");
+      }
+
+      const data = await response.json();
+      setConversations(data.conversations || []);
+      setBackendConnected(true);
+      return data.conversations || [];
+    } catch (err) {
+      setBackendConnected(false);
+      throw err;
+    }
+  }, []);
+
+  const checkBackend = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/health`);
+      setBackendConnected(response.ok);
+    } catch {
+      setBackendConnected(false);
+    }
+  }, []);
+
+  const openConversation = useCallback(
+    async (id) => {
+      if (!id || busyRef.current) return;
+
+      setHistoryLoading(true);
+      setError("");
+      setActivities([]);
+      conversationIdRef.current = id;
+      setConversationId(id);
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/conversations/${encodeURIComponent(id)}/messages`
+        );
+
+        if (!response.ok) {
+          throw new Error("Could not load this conversation.");
+        }
+
+        const data = await response.json();
+
+        setMessages(
+          (data.messages || []).map((message) => ({
+            role:
+              message.role === "model" || message.role === "assistant"
+                ? "assistant"
+                : "user",
+            content: message.content,
+          }))
+        );
+
+        addActivity("Conversation history loaded.", "success");
+      } catch (err) {
+        setError(err.message || "Failed to load conversation.");
+        addActivity("Failed to load conversation history.", "error");
+      } finally {
+        setHistoryLoading(false);
+      }
+    },
+    [addActivity]
+  );
+
+  const createNewConversation = useCallback(async () => {
+    if (busyRef.current) return;
+
+    setError("");
+    setActivities([]);
+    setMessages([]);
+    setInput("");
+    conversationIdRef.current = null;
+    setConversationId(null);
 
     try {
-      const response = await fetch(API_URL, {
+      const response = await fetch(`${API_BASE}/conversations`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ title: "New conversation" }),
       });
 
       if (!response.ok) {
+        throw new Error("Could not create a new conversation.");
+      }
+
+      const data = await response.json();
+      const id = data.id || data.conversation_id;
+
+      if (!id) {
+        throw new Error("The backend did not return a conversation ID.");
+      }
+
+      conversationIdRef.current = id;
+      setConversationId(id);
+      addActivity("New conversation created.", "success");
+      await refreshConversations();
+    } catch (err) {
+      setError(err.message || "Failed to create conversation.");
+      addActivity("Could not create a new conversation.", "error");
+    }
+  }, [addActivity, refreshConversations]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function initialize() {
+      try {
+        const items = await refreshConversations();
+
+        if (cancelled) return;
+
+        if (items.length > 0) {
+          await openConversation(items[0].id);
+        } else {
+          await createNewConversation();
+        }
+      } catch {
+        if (!cancelled) {
+          setError("Backend is unavailable. Start your FastAPI server.");
+        }
+      }
+    }
+
+    initialize();
+    checkBackend();
+
+    const intervalId = setInterval(checkBackend, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [refreshConversations, openConversation, createNewConversation, checkBackend]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  useEffect(() => {
+    activityEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activities]);
+
+  const sendMessage = async (event) => {
+    event.preventDefault();
+
+    const text = input.trim();
+
+    if (!text || loading || busyRef.current) return;
+
+    if (!backendConnected) {
+      setError("Backend is disconnected. Please start the backend first.");
+      return;
+    }
+
+    busyRef.current = true;
+    setLoading(true);
+    setError("");
+    setInput("");
+
+    setMessages((previous) => [
+      ...previous,
+      { role: "user", content: text },
+    ]);
+
+    addActivity("Sending message to the AI agent...", "info");
+
+    let assistantText = "";
+    let assistantMessageAdded = false;
+    let streamBuffer = "";
+
+    const ensureAssistantMessage = () => {
+      if (!assistantMessageAdded) {
+        assistantMessageAdded = true;
+        setMessages((previous) => [
+          ...previous,
+          { role: "assistant", content: assistantText },
+        ]);
+      } else {
+        setMessages((previous) => {
+          const updated = [...previous];
+          const last = updated[updated.length - 1];
+
+          if (last?.role === "assistant") {
+            updated[updated.length - 1] = {
+              ...last,
+              content: assistantText,
+            };
+          }
+
+          return updated;
+        });
+      }
+    };
+
+    const handleEvent = (rawEvent) => {
+      const dataLines = rawEvent
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (!dataLines.length) return;
+
+      let payload;
+
+      try {
+        payload = JSON.parse(dataLines.join("\n"));
+      } catch {
+        return;
+      }
+
+      const type = String(payload.type || payload.event || "").toLowerCase();
+      const message =
+        payload.message ||
+        payload.activity ||
+        payload.content ||
+        payload.text ||
+        "";
+
+      if (
+        type.includes("activity") ||
+        type.includes("tool") ||
+        type.includes("status") ||
+        type.includes("search") ||
+        type.includes("memory") ||
+        type.includes("step") ||
+        type.includes("error")
+      ) {
+        if (message) {
+          addActivity(
+            message,
+            type.includes("error") ? "error" : "info"
+          );
+        }
+      }
+
+      if (type === "token" || type === "chunk") {
+        assistantText += payload.text || payload.content || "";
+        ensureAssistantMessage();
+      } else if (
+        type === "answer" ||
+        type === "response" ||
+        type === "final" ||
+        type === "complete"
+      ) {
+        const finalText =
+          payload.answer || payload.response || payload.content || payload.text;
+
+        if (finalText) {
+          assistantText = finalText;
+          ensureAssistantMessage();
+        }
+
+        addActivity("Agent response received.", "success");
+      } else if (type === "error") {
+        setError(message || "The agent encountered an error.");
+        addActivity(message || "Agent error.", "error");
+      } else if (payload.answer && typeof payload.answer === "string") {
+        assistantText = payload.answer;
+        ensureAssistantMessage();
+      }
+    };
+
+    try {
+      let activeId = conversationIdRef.current;
+
+      if (!activeId) {
+        const createResponse = await fetch(`${API_BASE}/conversations`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "New conversation" }),
+        });
+
+        if (!createResponse.ok) {
+          throw new Error("Could not create a conversation.");
+        }
+
+        const created = await createResponse.json();
+        activeId = created.id || created.conversation_id;
+
+        if (!activeId) {
+          throw new Error("No conversation ID returned by the backend.");
+        }
+
+        conversationIdRef.current = activeId;
+        setConversationId(activeId);
+      }
+
+      const response = await fetch(`${API_BASE}/chat/stream`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          message: text,
+          conversation_id: activeId,
+        }),
+      });
+
+      if (!response.ok) {
+        const details = await response.text();
         throw new Error(
-          `Backend returned ${response.status}. Is api.py running?`
+          `Chat request failed (${response.status}). ${details.slice(0, 300)}`
         );
       }
 
       if (!response.body) {
-        throw new Error("The browser could not read the response stream.");
+        throw new Error("The backend did not return a stream.");
       }
+
+      addActivity("Connected to the agent stream.", "success");
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = "";
-
-      function processEvent(block) {
-        const dataLines = block
-          .split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart());
-
-        if (!dataLines.length) return;
-
-        try {
-          const event = JSON.parse(dataLines.join("\n"));
-
-          if (event.type === "answer") {
-            finalAnswer = event.message || "";
-            return;
-          }
-
-          if (event.type === "error") {
-            streamError = event.message || "The agent encountered an error.";
-            return;
-          }
-
-          if (event.type === "done") return;
-
-          const activity = formatEvent(event);
-          setActivities((previous) => [...previous, activity]);
-        } catch (parseError) {
-          console.warn("Could not parse activity event:", parseError);
-        }
-      }
 
       while (true) {
         const { value, done } = await reader.read();
-
-        buffer += decoder.decode(value || new Uint8Array(), {
-          stream: !done,
-        });
-
-        const blocks = buffer.split("\n\n");
-        buffer = blocks.pop() || "";
-
-        blocks.forEach(processEvent);
-
         if (done) break;
+
+        streamBuffer += decoder.decode(value, { stream: true });
+
+        const blocks = streamBuffer.split(/\r?\n\r?\n/);
+        streamBuffer = blocks.pop() || "";
+
+        for (const block of blocks) {
+          handleEvent(block);
+        }
       }
 
-      if (buffer.trim()) processEvent(buffer);
-
-      if (streamError) {
-        throw new Error(streamError);
+      if (streamBuffer.trim()) {
+        handleEvent(streamBuffer);
       }
 
-      if (!finalAnswer) {
-        throw new Error(
-          "No answer received. Check the backend terminal for errors."
+      if (!assistantText && !assistantMessageAdded) {
+        addActivity(
+          "The stream ended without a recognized answer event. Check the backend SSE event format.",
+          "warning"
         );
       }
 
-      setMessages((previous) => [
-        ...previous,
-        { role: "assistant", content: finalAnswer },
-      ]);
-
-      setActivities((previous) => [
-        ...previous,
-        {
-          type: "completed",
-          title: "Agent completed",
-          details: ["Response delivered successfully"],
-          time: new Date().toLocaleTimeString(),
-        },
-      ]);
-
-      setSessionCount((count) => count + 1);
+      await refreshConversations();
+      addActivity("Conversation saved.", "success");
     } catch (err) {
-      setError(err.message || "Something went wrong.");
-
-      setActivities((previous) => [
-        ...previous,
-        {
-          type: "error",
-          title: "Request failed",
-          details: [err.message || "Unknown error"],
-          time: new Date().toLocaleTimeString(),
-        },
-      ]);
+      setError(err.message || "Something went wrong while sending the message.");
+      addActivity(err.message || "Request failed.", "error");
     } finally {
+      busyRef.current = false;
       setLoading(false);
     }
-  }
+  };
 
-  function handleSubmit(event) {
-    event.preventDefault();
-    sendMessage();
-  }
-
-  function clearChat() {
-    if (loading) return;
-    setMessages([]);
-    setActivities([]);
-    setError("");
-    setSessionCount(0);
-  }
+  const currentConversation = conversations.find(
+    (item) => item.id === conversationId
+  );
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">✳</div>
+          <div className="brand-icon">AI</div>
           <div>
-            <h1>Agent Studio</h1>
-            <p>AI WORKSPACE</p>
+            <h2>Frostyy's Agent</h2>
+            <p>Tool Calling Assistant</p>
           </div>
         </div>
 
-        <button className="new-chat-button" onClick={clearChat} disabled={loading}>
-          <span>＋</span> New conversation
+        <button
+          className="new-chat-button"
+          onClick={createNewConversation}
+          disabled={loading}
+        >
+          <span>＋</span> New Conversation
         </button>
 
-        <div className="sidebar-label">WORKSPACE</div>
-        <div className="nav-item active">
-          <span>◫</span> Agent Chat
-          <span className="nav-dot" />
-        </div>
-        <div className="nav-item">
-          <span>⌘</span> Tool Activity
-        </div>
-        <div className="nav-item">
-          <span>◷</span> Conversation
+        <div className="sidebar-section-title">YOUR CONVERSATIONS</div>
+
+        <div className="conversation-list">
+          {conversations.map((conversation) => (
+            <button
+              key={conversation.id}
+              className={`conversation-item ${
+                conversation.id === conversationId ? "active" : ""
+              }`}
+              onClick={() => openConversation(conversation.id)}
+              disabled={loading || historyLoading}
+              title={conversation.title}
+            >
+              <span className="conversation-icon">▤</span>
+              <span className="conversation-title">
+                {conversation.title || "New conversation"}
+              </span>
+            </button>
+          ))}
+
+          {conversations.length === 0 && (
+            <p className="empty-sidebar">No conversations yet.</p>
+          )}
         </div>
 
-        <div className="sidebar-spacer" />
-
-        <div className="backend-card">
-          <div className="status-line">
-            <span className="status-dot" />
-            <span>Backend connection</span>
+        <div className="sidebar-footer">
+          <div className="connection-card">
+            <span
+              className={`status-dot ${
+                backendConnected ? "connected" : "disconnected"
+              }`}
+            />
+            <div>
+              <div className="connection-title">Backend Connection</div>
+              <div
+                className={`connection-label ${
+                  backendConnected ? "online" : "offline"
+                }`}
+              >
+                {backendConnected ? "Connected" : "Disconnected"}
+              </div>
+            </div>
+            <button
+              className="refresh-status"
+              title="Check backend connection"
+              onClick={checkBackend}
+            >
+              ↻
+            </button>
           </div>
-          <p>Local Python API</p>
-          <code>localhost:8000</code>
-        </div>
-
-        <div className="profile">
-          <div className="avatar">AI</div>
-          <div>
-            <strong>AI Agent</strong>
-            <p>Gemini · Tool Calling</p>
-          </div>
-          <span className="profile-menu">···</span>
+          <p className="sidebar-version">AI Agent · Local Environment</p>
         </div>
       </aside>
 
-      <main className="main-area">
+      <main className="main-panel">
         <header className="topbar">
-          <div className="breadcrumb">
-            Workspace <span>/</span> <strong>Agent Chat</strong>
+          <div>
+            <h1>{currentConversation?.title || "New Conversation"}</h1>
+            <p>Ask questions and let your AI agent use its tools.</p>
           </div>
-          <div className="topbar-right">
-            <span className="live-pill"><span /> LIVE SESSION</span>
-            <div className="topbar-avatar">U</div>
+
+          <div className="topbar-status">
+            <span
+              className={`status-dot ${
+                backendConnected ? "connected" : "disconnected"
+              }`}
+            />
+            {backendConnected ? "Backend Online" : "Backend Offline"}
           </div>
         </header>
 
         <div className="workspace">
           <section className="chat-panel">
-            <div className="panel-heading">
-              <div>
-                <div className="eyebrow">YOUR AI ASSISTANT</div>
-                <h2>Let's get things done.</h2>
-                <p>Ask a question or give your agent a task.</p>
-              </div>
-              <div className="model-badge">
-                <span className="model-icon">✦</span>
-                Gemini Agent
-              </div>
-            </div>
+            <div className="messages">
+              {historyLoading && (
+                <div className="loading-history">Loading conversation...</div>
+              )}
 
-            <div className="chat-content">
-              {messages.length === 0 ? (
-                <div className="welcome">
-                  <div className="welcome-icon">✳</div>
-                  <h3>What can I help you with?</h3>
+              {!historyLoading && messages.length === 0 && (
+                <div className="welcome-screen">
+                  <div className="welcome-icon">✦</div>
+                  <h2>How can I help you?</h2>
                   <p>
-                    I can answer questions, use tools, search the web,
-                    and work with saved memories.
+                    Ask a question. Your agent can use tools, search information,
+                    and remember conversations.
                   </p>
-
-                  <div className="suggestions">
-                    {suggestions.map((item) => (
-                      <button
-                        className="suggestion-card"
-                        key={item.title}
-                        onClick={() => sendMessage(item.prompt)}
-                        disabled={loading}
-                      >
-                        <span className="suggestion-icon">{item.icon}</span>
-                        <span>
-                          <strong>{item.title}</strong>
-                          <small>{item.prompt}</small>
-                        </span>
-                        <span className="suggestion-arrow">↗</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="messages">
-                  {messages.map((message, index) => (
-                    <div
-                      className={`message-row ${message.role}`}
-                      key={`${index}-${message.role}`}
-                    >
-                      <div className="message-avatar">
-                        {message.role === "user" ? "U" : "✳"}
-                      </div>
-                      <div className="message-body">
-                        <div className="message-author">
-                          {message.role === "user" ? "You" : "AI Agent"}
-                        </div>
-                        <div className="message-bubble">
-                          {message.content}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-
-                  {loading && (
-                    <div className="message-row assistant">
-                      <div className="message-avatar">✳</div>
-                      <div className="message-body">
-                        <div className="message-author">AI Agent</div>
-                        <div className="message-bubble thinking">
-                          <span className="typing-dots">
-                            <i /><i /><i />
-                          </span>
-                          Working on your request...
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  <div id="chat-bottom" />
                 </div>
               )}
+
+              {messages.map((message, index) => (
+                <div
+                  key={`${conversationId}-${index}`}
+                  className={`message-row ${message.role}`}
+                >
+                  <div className={`message-avatar ${message.role}`}>
+                    {message.role === "assistant" ? "AI" : "You"}
+                  </div>
+                  <div className="message-content">
+                    <div className="message-author">
+                      {message.role === "assistant" ? "AI Agent" : "You"}
+                    </div>
+                    <div className="message-bubble">
+                      {message.content}
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {loading && (
+                <div className="message-row assistant">
+                  <div className="message-avatar assistant">AI</div>
+                  <div className="message-content">
+                    <div className="message-author">AI Agent</div>
+                    <div className="thinking-indicator">
+                      <span />
+                      <span />
+                      <span />
+                      <small>Working...</small>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
             </div>
 
-            {error && <div className="error-banner">⚠ {error}</div>}
+            {error && (
+              <div className="error-banner">
+                <span>{error}</span>
+                <button onClick={() => setError("")}>×</button>
+              </div>
+            )}
 
-            <div className="composer-area">
-              <form className="composer" onSubmit={handleSubmit}>
+            <form className="chat-input-area" onSubmit={sendMessage}>
+              <div className="input-wrapper">
                 <textarea
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
+                  placeholder={
+                    backendConnected
+                      ? "Message your AI agent..."
+                      : "Backend disconnected..."
+                  }
+                  rows={1}
+                  disabled={loading || !backendConnected}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing
+                    ) {
                       event.preventDefault();
-                      handleSubmit(event);
+                      event.currentTarget.form?.requestSubmit();
                     }
                   }}
-                  placeholder="Message your AI agent..."
-                  rows={1}
-                  disabled={loading}
                 />
-                <div className="composer-footer">
-                  <span className="composer-hint">↵ Send · Shift + ↵ New line</span>
-                  <button
-                    type="submit"
-                    className="send-button"
-                    disabled={loading || !input.trim()}
-                    aria-label="Send message"
-                  >
-                    {loading ? "…" : "↑"}
-                  </button>
-                </div>
-              </form>
-              <p className="disclaimer">
-                AI can make mistakes. Verify important information.
+
+                <button
+                  type="submit"
+                  className="send-button"
+                  disabled={!input.trim() || loading || !backendConnected}
+                  title="Send message"
+                >
+                  {loading ? "…" : "↑"}
+                </button>
+              </div>
+              <p className="input-hint">
+                Enter to send · Shift + Enter for a new line
               </p>
-            </div>
+            </form>
           </section>
 
           <aside className="activity-panel">
-            <div className="activity-heading">
+            <div className="activity-header">
               <div>
-                <div className="eyebrow">UNDER THE HOOD</div>
-                <h2>Agent Activity</h2>
+                <h2>Activity Log</h2>
+                <p>Live agent activity</p>
               </div>
-              <span className={`activity-status ${loading ? "running" : ""}`}>
-                <span /> {loading ? "RUNNING" : "READY"}
-              </span>
+              <span className="activity-count">{activities.length}</span>
             </div>
 
-            <div className="activity-summary">
-              <div>
-                <span className="summary-icon">ϟ</span>
-                <div><small>Requests</small><strong>{sessionCount}</strong></div>
-              </div>
-              <div>
-                <span className="summary-icon">⌘</span>
-                <div><small>Events</small><strong>{activities.length}</strong></div>
-              </div>
+            <div className="activity-status">
+              <span
+                className={`status-dot ${
+                  backendConnected ? "connected" : "disconnected"
+                }`}
+              />
+              {backendConnected ? "Backend connected" : "Backend unavailable"}
             </div>
 
-            <div className="activity-feed">
+            <div className="activity-list">
               {activities.length === 0 ? (
                 <div className="activity-empty">
-                  <div className="empty-orbit">⌘</div>
-                  <strong>Waiting for activity</strong>
-                  <p>Send a message to watch your agent think and use its tools.</p>
+                  <span className="activity-empty-icon">⌁</span>
+                  <p>No activity yet</p>
+                  <small>Agent steps and tool events will appear here.</small>
                 </div>
               ) : (
-                <>
-                  <div className="feed-caption">LIVE EVENT STREAM</div>
-                  {activities.map((activity, index) => (
-                    <div className="activity-item" key={`${index}-${activity.time}`}>
-                      <div className={`activity-marker ${activity.type}`}>
-                        {activity.type === "error"
-                          ? "!"
-                          : activity.type === "completed"
-                            ? "✓"
-                            : activity.type?.includes("tool")
-                              ? "⌘"
-                              : "•"}
-                      </div>
-                      <div className="activity-details">
-                        <div className="activity-item-top">
-                          <strong>{activity.title}</strong>
-                          <time>{activity.time}</time>
-                        </div>
-                        {activity.details.map((detail, detailIndex) => (
-                          <p key={detailIndex}>{detail}</p>
-                        ))}
-                      </div>
+                activities.map((activity) => (
+                  <div
+                    key={activity.id}
+                    className={`activity-item ${activity.type}`}
+                  >
+                    <div className="activity-timeline">
+                      <span className="activity-dot" />
+                      <span className="activity-line" />
                     </div>
-                  ))}
-                  {loading && (
-                    <div className="streaming-indicator">
-                      <span className="pulse-dot" /> Listening for events...
+                    <div className="activity-details">
+                      <div className="activity-message">
+                        {activity.message}
+                      </div>
+                      <div className="activity-time">{activity.time}</div>
                     </div>
-                  )}
-                </>
+                  </div>
+                ))
               )}
+              <div ref={activityEndRef} />
             </div>
 
             <div className="activity-footer">
-              <span className="status-dot" />
-              <span>Streaming via Server-Sent Events</span>
+              <span className="live-indicator" />
+              Activity updates during agent execution
             </div>
           </aside>
         </div>
@@ -458,3 +641,5 @@ export default function App() {
     </div>
   );
 }
+
+export default App;

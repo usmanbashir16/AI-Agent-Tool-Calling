@@ -1,4 +1,8 @@
-
+import asyncio
+import uuid
+import sys
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 import os
 import json
 import sqlite3
@@ -82,12 +86,12 @@ def web_search(query, max_results=5):
 
 
 def initialize_database():
-    """Create the SQLite tables required by the AI agent."""
+    """Create and safely migrate the SQLite database."""
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
 
-        # Table 1: Persistent long-term memories
+        # Existing long-term memories table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 memory_key TEXT PRIMARY KEY,
@@ -96,7 +100,17 @@ def initialize_database():
             )
         """)
 
-        # Table 2: Persistent conversation history
+        # One record for each conversation
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        # Preserve the existing message table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS conversation_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,30 +120,122 @@ def initialize_database():
             )
         """)
 
-        conn.commit()
+        # Add conversation_id to an existing database if needed
+        columns = {
+            row[1]
+            for row in cursor.execute(
+                "PRAGMA table_info(conversation_history)"
+            ).fetchall()
+        }
 
-        # Verify that both tables exist
-        cursor.execute("""
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name IN ('memories', 'conversation_history')
-        """)
+        if "conversation_id" not in columns:
+            cursor.execute("""
+                ALTER TABLE conversation_history
+                ADD COLUMN conversation_id TEXT
+            """)
 
-        tables = {row[0] for row in cursor.fetchall()}
+        # Keep old messages together as one legacy conversation
+        old_messages = cursor.execute("""
+            SELECT id, role, content, created_at
+            FROM conversation_history
+            WHERE conversation_id IS NULL
+            ORDER BY id ASC
+        """).fetchall()
 
-        if "memories" not in tables:
-            raise RuntimeError("The memories table was not created.")
+        if old_messages:
+            legacy_id = str(uuid.uuid4())
+            created_at = old_messages[0][3]
+            updated_at = old_messages[-1][3]
 
-        if "conversation_history" not in tables:
-            raise RuntimeError(
-                "The conversation_history table was not created."
+            # Generate a readable title from the first user message
+            first_user_message = next(
+                (
+                    row[2]
+                    for row in old_messages
+                    if row[1] == "user"
+                ),
+                "Previous conversation",
             )
+
+            title = " ".join(first_user_message.split())[:60]
+            if not title:
+                title = "Previous conversation"
+
+            cursor.execute("""
+                INSERT INTO conversations (
+                    id, title, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                legacy_id,
+                title,
+                created_at,
+                updated_at,
+            ))
+
+            cursor.execute("""
+                UPDATE conversation_history
+                SET conversation_id = ?
+                WHERE conversation_id IS NULL
+            """, (legacy_id,))
+
+        conn.commit()
 
     print("Database initialized successfully.")
     print("Database file:", DB_PATH)
-    print("Tables ready: memories, conversation_history")
+    print("Tables ready: memories, conversations, conversation_history")
+# =========================================================
+# MCP CLIENT
+# =========================================================
 
+MCP_SERVER_PATH = BASE_DIR / "mcp_server.py"
+
+
+async def call_mcp_tool_async(name, arguments):
+    """Connect to the local MCP server and execute a tool."""
+
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(MCP_SERVER_PATH)],
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # Discover the tools exposed by the MCP server.
+            available_tools = await session.list_tools()
+            tool_names = {tool.name for tool in available_tools.tools}
+
+            if name not in tool_names:
+                return {
+                    "error": f"MCP tool '{name}' was not found.",
+                    "available_tools": sorted(tool_names),
+                }
+
+            result = await session.call_tool(
+                name,
+                arguments=arguments,
+            )
+
+            content = [
+                item.text
+                for item in result.content
+                if hasattr(item, "text")
+            ]
+
+            if result.isError:
+                return {
+                    "error": "\n".join(content) or "MCP tool failed."
+                }
+
+            return "\n".join(content)
+
+
+def call_mcp_tool(name, arguments):
+    """Synchronous bridge for the existing Gemini agent."""
+
+    return asyncio.run(call_mcp_tool_async(name, arguments))
 
 # =========================================================
 # CALCULATOR
@@ -568,6 +674,28 @@ agent_tools = [
                 },
                 "required": ["query"]
             }
+            },
+            {
+            "name": "mcp_web_search",
+            "description": (
+                "Search the web through the connected MCP server. "
+                "Use this tool when the user requests current web "
+                "information or online research."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "query": {
+                        "type": "STRING",
+                        "description": "The search query."
+                    },
+                    "max_results": {
+                        "type": "INTEGER",
+                        "description": "Maximum results, from 1 to 5."
+                    }
+                },
+                "required": ["query"]
+            }
             }
            
         ]
@@ -602,6 +730,15 @@ def execute_tool(name, arguments):
         "analyze_text": lambda args: analyze_text(args["text"]),
         "save_memory": lambda args: save_memory(
             args["key"], args["value"]
+        ),
+        "mcp_web_search": lambda args: call_mcp_tool(
+        "web_search",
+            {
+                "query": args["query"],
+                "max_results": max(
+                    1, min(int(args.get("max_results", 5)), 5)
+                ),
+            },
         ),
         "search_conversations": lambda args: search_conversations(
             args["query"],
@@ -646,32 +783,133 @@ def execute_tool(name, arguments):
 # GEMINI AGENT LOOP
 # =========================================================
 
-def save_chat_message(role, content):
-    """Save a user or assistant message in SQLite."""
+
+def create_conversation(title="New conversation"):
+    """Create a new persistent conversation."""
+    conversation_id = str(uuid.uuid4())
     timestamp = datetime.now().astimezone().isoformat()
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO conversation_history
-                (role, content, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO conversations (id, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (role, content, timestamp),
+            (conversation_id, title, timestamp, timestamp),
         )
 
+    return conversation_id
 
-def load_recent_chat_history(limit=20):
-    """Load recent saved messages in chronological order."""
+
+def list_conversations():
+    """Return saved conversations, newest activity first."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                c.id,
+                c.title,
+                c.created_at,
+                c.updated_at,
+                COUNT(h.id) AS message_count
+            FROM conversations c
+            LEFT JOIN conversation_history h
+                ON h.conversation_id = c.id
+            GROUP BY c.id
+            ORDER BY c.updated_at DESC
+            """
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_conversation_messages(conversation_id):
+    """Return the messages belonging to one conversation."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, role, content, created_at
+            FROM conversation_history
+            WHERE conversation_id = ?
+            ORDER BY id ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def save_chat_message(role, content, conversation_id):
+    """Save a message and update its conversation metadata."""
+    timestamp = datetime.now().astimezone().isoformat()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO conversation_history
+                (role, content, created_at, conversation_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (role, content, timestamp, conversation_id),
+        )
+
+        # Give a new conversation a title based on its first user message.
+        if role == "user":
+            row = conn.execute(
+                "SELECT title FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+
+            if row is not None:
+                current_title = row[0]
+
+                if current_title == "New conversation":
+                    title = " ".join(content.split())[:60]
+                    if not title:
+                        title = "New conversation"
+
+                    conn.execute(
+                        """
+                        UPDATE conversations
+                        SET title = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (title, timestamp, conversation_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE conversations
+                        SET updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (timestamp, conversation_id),
+                    )
+        else:
+            conn.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, conversation_id),
+            )
+
+
+def load_recent_chat_history(conversation_id, limit=20):
+    """Load recent messages for one conversation in chronological order."""
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             """
             SELECT role, content
             FROM conversation_history
+            WHERE conversation_id = ?
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (conversation_id, limit),
         ).fetchall()
 
     history = []
@@ -679,7 +917,7 @@ def load_recent_chat_history(limit=20):
     for role, content in reversed(rows):
         history.append(
             types.Content(
-                role=role,
+                role="model" if role == "assistant" else role,
                 parts=[types.Part.from_text(text=content)],
             )
         )
@@ -857,11 +1095,15 @@ def emit_activity(activity_callback, event, message, details=None):
             print(f"Activity callback error: {error}")
 
 
-def run_agent(user_input, activity_callback=None):
-    # Save the user's message to persistent chat history
-    save_chat_message("user", user_input)
+def run_agent(user_input, conversation_id, activity_callback=None):
+    # Load history for this conversation
+    history = load_recent_chat_history(conversation_id)
 
-    conversation_history.append(
+    # Save the user's message to this conversation
+    save_chat_message("user", user_input, conversation_id)
+
+    # Add the new message to the loaded history
+    history.append(
         types.Content(
             role="user",
             parts=[types.Part.from_text(text=user_input)],
@@ -892,7 +1134,7 @@ def run_agent(user_input, activity_callback=None):
 
                 response = client.models.generate_content(
                     model=MODEL,
-                    contents=conversation_history,
+                    contents=history,
                     config=types.GenerateContentConfig(
                         tools=agent_tools,
                         system_instruction=(
@@ -998,7 +1240,7 @@ def run_agent(user_input, activity_callback=None):
             )
 
             # Save the final assistant reply to SQLite
-            save_chat_message("model", assistant_reply)
+            save_chat_message("model", assistant_reply, conversation_id)
 
             emit_activity(
                 activity_callback,
