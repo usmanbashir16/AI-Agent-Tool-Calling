@@ -7,5 +7,5 @@ fastapi
 uvicorn[standard]
 requests
 ddgs
-MCP
-MCP<2
+mcp
+pypdf
