@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
 const API_BASE = "http://127.0.0.1:8000";
+const MAX_PDF_SIZE = 20 * 1024 * 1024;
 
 function App() {
   const [conversations, setConversations] = useState([]);
@@ -15,6 +16,13 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [backendConnected, setBackendConnected] = useState(false);
   const [error, setError] = useState("");
+
+  // PDF upload state
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
+  const [uploadError, setUploadError] = useState(false);
+  const fileInputRef = useRef(null);
 
   const busyRef = useRef(false);
   const conversationIdRef = useRef(null);
@@ -170,7 +178,12 @@ function App() {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [refreshConversations, openConversation, createNewConversation, checkBackend]);
+  }, [
+    refreshConversations,
+    openConversation,
+    createNewConversation,
+    checkBackend,
+  ]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -179,6 +192,121 @@ function App() {
   useEffect(() => {
     activityEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activities]);
+
+  // =======================================================
+  // PDF FILE SELECTION
+  // =======================================================
+
+  const handleFileSelection = (event) => {
+    const file = event.target.files?.[0];
+
+    // Allow selecting the same file again after clearing it.
+    if (!file) return;
+
+    setUploadMessage("");
+    setUploadError(false);
+
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      setSelectedFile(null);
+      setUploadMessage("Please select a PDF file.");
+      setUploadError(true);
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size === 0) {
+      setSelectedFile(null);
+      setUploadMessage("The selected file is empty.");
+      setUploadError(true);
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > MAX_PDF_SIZE) {
+      setSelectedFile(null);
+      setUploadMessage("PDF must be 20 MB or smaller.");
+      setUploadError(true);
+      event.target.value = "";
+      return;
+    }
+
+    setSelectedFile(file);
+  };
+
+  // =======================================================
+  // UPLOAD PDF TO FASTAPI
+  // =======================================================
+
+  const uploadPdf = async () => {
+    if (!selectedFile || uploading) return;
+
+    if (!backendConnected) {
+      setUploadMessage("Backend is disconnected. Start FastAPI first.");
+      setUploadError(true);
+      return;
+    }
+
+    setUploading(true);
+    setUploadMessage("Uploading and indexing PDF...");
+    setUploadError(false);
+
+    addActivity(`Uploading PDF: ${selectedFile.name}`, "info");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      const response = await fetch(`${API_BASE}/upload-pdf`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail || `PDF upload failed (${response.status}).`
+        );
+      }
+
+      if (data.status === "already_exists") {
+        setUploadMessage(
+          `${data.filename} is already indexed. You can ask questions about it.`
+        );
+        addActivity(
+          `PDF already indexed: ${data.filename}`,
+          "success"
+        );
+      } else {
+        setUploadMessage(
+          `${data.filename}: ${data.pages_processed} pages processed, ` +
+            `${data.chunks_stored} chunks indexed.`
+        );
+
+        addActivity(
+          `PDF indexed successfully: ${data.filename} ` +
+            `(${data.chunks_stored} chunks)`,
+          "success"
+        );
+      }
+
+      setSelectedFile(null);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    } catch (err) {
+      setUploadMessage(err.message || "PDF upload failed.");
+      setUploadError(true);
+      addActivity(err.message || "PDF upload failed.", "error");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // =======================================================
+  // CHAT STREAMING
+  // =======================================================
 
   const sendMessage = async (event) => {
     event.preventDefault();
@@ -248,7 +376,10 @@ function App() {
         return;
       }
 
-      const type = String(payload.type || payload.event || "").toLowerCase();
+      const type = String(
+        payload.type || payload.event || ""
+      ).toLowerCase();
+
       const message =
         payload.message ||
         payload.activity ||
@@ -283,7 +414,10 @@ function App() {
         type === "complete"
       ) {
         const finalText =
-          payload.answer || payload.response || payload.content || payload.text;
+          payload.answer ||
+          payload.response ||
+          payload.content ||
+          payload.text;
 
         if (finalText) {
           assistantText = finalText;
@@ -373,7 +507,8 @@ function App() {
 
       if (!assistantText && !assistantMessageAdded) {
         addActivity(
-          "The stream ended without a recognized answer event. Check the backend SSE event format.",
+          "The stream ended without a recognized answer event. " +
+            "Check the backend SSE event format.",
           "warning"
         );
       }
@@ -381,7 +516,9 @@ function App() {
       await refreshConversations();
       addActivity("Conversation saved.", "success");
     } catch (err) {
-      setError(err.message || "Something went wrong while sending the message.");
+      setError(
+        err.message || "Something went wrong while sending the message."
+      );
       addActivity(err.message || "Request failed.", "error");
     } finally {
       busyRef.current = false;
@@ -407,7 +544,7 @@ function App() {
         <button
           className="new-chat-button"
           onClick={createNewConversation}
-          disabled={loading}
+          disabled={loading || uploading}
         >
           <span>＋</span> New Conversation
         </button>
@@ -422,7 +559,7 @@ function App() {
                 conversation.id === conversationId ? "active" : ""
               }`}
               onClick={() => openConversation(conversation.id)}
-              disabled={loading || historyLoading}
+              disabled={loading || historyLoading || uploading}
               title={conversation.title}
             >
               <span className="conversation-icon">▤</span>
@@ -487,7 +624,9 @@ function App() {
           <section className="chat-panel">
             <div className="messages">
               {historyLoading && (
-                <div className="loading-history">Loading conversation...</div>
+                <div className="loading-history">
+                  Loading conversation...
+                </div>
               )}
 
               {!historyLoading && messages.length === 0 && (
@@ -495,8 +634,8 @@ function App() {
                   <div className="welcome-icon">✦</div>
                   <h2>How can I help you?</h2>
                   <p>
-                    Ask a question. Your agent can use tools, search information,
-                    and remember conversations.
+                    Ask a question. Your agent can use tools, search
+                    information, and remember conversations.
                   </p>
                 </div>
               )}
@@ -513,9 +652,7 @@ function App() {
                     <div className="message-author">
                       {message.role === "assistant" ? "AI Agent" : "You"}
                     </div>
-                    <div className="message-bubble">
-                      {message.content}
-                    </div>
+                    <div className="message-bubble">{message.content}</div>
                   </div>
                 </div>
               ))}
@@ -545,7 +682,77 @@ function App() {
               </div>
             )}
 
+            {/* PDF upload and chat input */}
             <form className="chat-input-area" onSubmit={sendMessage}>
+              <div className="pdf-upload-area">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={handleFileSelection}
+                  disabled={uploading}
+                  hidden
+                />
+
+                <button
+                  type="button"
+                  className="pdf-select-button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!backendConnected || uploading}
+                  title="Select a PDF to index"
+                >
+                  {uploading ? "Processing PDF..." : "＋ Upload PDF"}
+                </button>
+
+                {selectedFile && (
+                  <div className="selected-pdf">
+                    <span className="pdf-file-icon">PDF</span>
+                    <span className="selected-pdf-name" title={selectedFile.name}>
+                      {selectedFile.name}
+                    </span>
+                    <button
+                      type="button"
+                      className="remove-pdf-button"
+                      onClick={() => {
+                        setSelectedFile(null);
+                        setUploadMessage("");
+                        setUploadError(false);
+                        if (fileInputRef.current) {
+                          fileInputRef.current.value = "";
+                        }
+                      }}
+                      disabled={uploading}
+                      aria-label="Remove selected PDF"
+                    >
+                      ×
+                    </button>
+                    <button
+                      type="button"
+                      className="pdf-upload-submit"
+                      onClick={uploadPdf}
+                      disabled={uploading || !backendConnected}
+                    >
+                      {uploading ? "Uploading..." : "Index PDF"}
+                    </button>
+                  </div>
+                )}
+
+                {uploadMessage && (
+                  <div
+                    className={`pdf-upload-message ${
+                      uploadError ? "error" : "success"
+                    }`}
+                    role="status"
+                  >
+                    {uploadMessage}
+                  </div>
+                )}
+
+                <p className="pdf-upload-hint">
+                  Upload a PDF to search its contents · Maximum 20 MB
+                </p>
+              </div>
+
               <div className="input-wrapper">
                 <textarea
                   value={input}
@@ -578,6 +785,7 @@ function App() {
                   {loading ? "…" : "↑"}
                 </button>
               </div>
+
               <p className="input-hint">
                 Enter to send · Shift + Enter for a new line
               </p>
@@ -607,7 +815,9 @@ function App() {
                 <div className="activity-empty">
                   <span className="activity-empty-icon">⌁</span>
                   <p>No activity yet</p>
-                  <small>Agent steps and tool events will appear here.</small>
+                  <small>
+                    Agent steps and tool events will appear here.
+                  </small>
                 </div>
               ) : (
                 activities.map((activity) => (

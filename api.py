@@ -5,7 +5,7 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -19,6 +19,8 @@ from main import (
     sync_sqlite_memories,
     sync_sqlite_conversations,
 )
+
+from rag.ingest import ingest_pdf_bytes
 
 
 # =========================================================
@@ -39,8 +41,14 @@ app.add_middleware(
 )
 
 
-# Keep agent execution sequential because each request has its
-# own loaded history, while other existing tools may use shared state.
+# =========================================================
+# SHARED SETTINGS
+# =========================================================
+
+# Maximum PDF upload size: 20 MB
+MAX_PDF_SIZE = 20 * 1024 * 1024
+
+# Keep agent execution sequential because it uses shared state.
 agent_lock = threading.Lock()
 executor = ThreadPoolExecutor(max_workers=1)
 
@@ -92,6 +100,86 @@ def health_check():
 
 
 # =========================================================
+# PDF UPLOAD ENDPOINT
+# =========================================================
+
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    """
+    Read an uploaded PDF in memory and index its text and embeddings
+    in ChromaDB. The original PDF is not saved to disk.
+    """
+
+    try:
+        filename = file.filename or ""
+
+        # Validate file extension.
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF files are supported.",
+            )
+
+        # Read at most 20 MB plus one byte to detect oversized uploads.
+        pdf_bytes = await file.read(MAX_PDF_SIZE + 1)
+
+        if not pdf_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded PDF is empty.",
+            )
+
+        if len(pdf_bytes) > MAX_PDF_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail="PDF is too large. Maximum upload size is 20 MB.",
+            )
+
+        # Basic check that the file looks like a PDF.
+        if b"%PDF-" not in pdf_bytes[:1024]:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded file does not appear to be a valid PDF.",
+            )
+
+        # Run CPU-intensive embedding work outside the async event loop.
+        # The lock avoids overlapping ingestion with agent execution.
+        def ingest_task():
+            with agent_lock:
+                return ingest_pdf_bytes(
+                    pdf_bytes=pdf_bytes,
+                    filename=filename,
+                )
+
+        result = await asyncio.to_thread(ingest_task)
+
+        return result
+
+    except HTTPException:
+        raise
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    except Exception as error:
+        print(f"PDF upload failed: {error}")
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "PDF processing failed. Check the backend terminal "
+                "for details."
+            ),
+        ) from error
+
+    finally:
+        await file.close()
+
+
+# =========================================================
 # CONVERSATION ENDPOINTS
 # =========================================================
 
@@ -105,6 +193,7 @@ def get_conversations():
 def new_conversation(request: CreateConversationRequest):
     """Create and return a new conversation."""
     title = " ".join(request.title.split())[:60]
+
     if not title:
         title = "New conversation"
 
@@ -149,7 +238,7 @@ async def chat_stream(request: ChatRequest):
             detail="Message cannot be empty.",
         )
 
-    # Support older frontend requests that do not yet send an ID.
+    # Support frontend requests that do not send a conversation ID.
     if request.conversation_id:
         conversation_id = request.conversation_id
 
@@ -210,7 +299,9 @@ async def chat_stream(request: ChatRequest):
                 event_queue.get,
             )
 
-            yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+            yield (
+                f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+            )
 
             if event.get("type") == "done":
                 break

@@ -1077,3 +1077,126 @@ button:disabled {
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* =====================================================
+   PDF UPLOAD
+   ===================================================== */
+
+.pdf-upload-area {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.pdf-select-button,
+.pdf-upload-submit {
+  border: 1px solid var(--border-color, #d8dce5);
+  border-radius: 10px;
+  padding: 9px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+
+.pdf-select-button {
+  background: var(--surface-color, #ffffff);
+  color: var(--text-color, #242938);
+}
+
+.pdf-select-button:hover,
+.pdf-upload-submit:hover {
+  opacity: 0.82;
+}
+
+.pdf-select-button:disabled,
+.pdf-upload-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.selected-pdf {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color, #d8dce5);
+  border-radius: 12px;
+  background: var(--surface-color, #00042a);
+}
+
+.pdf-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 5px 6px;
+  border-radius: 6px;
+  background: #fff0f0;
+  color: #c23d3d;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.selected-pdf-name {
+  flex: 1;
+  min-width: 80px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.remove-pdf-button {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.pdf-upload-submit {
+  background: var(--accent-color, #4b63d3);
+  color: #ffffff;
+  border-color: transparent;
+}
+
+.pdf-upload-message {
+  margin-top: 9px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pdf-upload-message.success {
+  background: #eaf8ef;
+  color: #176c39;
+}
+
+.pdf-upload-message.error {
+  background: #fff0f0;
+  color: #a62d2d;
+}
+
+.pdf-upload-hint {
+  margin: 7px 0 0;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+@media (max-width: 600px) {
+  .selected-pdf {
+    gap: 8px;
+  }
+
+  .selected-pdf-name {
+    flex-basis: calc(100% - 70px);
+  }
+
+  .pdf-upload-submit {
+    margin-left: auto;
+  }
+}

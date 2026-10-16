@@ -34,7 +34,7 @@ DB_PATH = BASE_DIR / "memory.db"
 load_dotenv(BASE_DIR / ".env")
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 if not API_KEY:
     raise ValueError(
@@ -482,6 +482,7 @@ def delete_memory(key):
 # =========================================================
 
 
+
 agent_tools = [
     {
         "function_declarations": [
@@ -494,8 +495,11 @@ agent_tools = [
                         "operation": {
                             "type": "STRING",
                             "enum": [
-                                "add", "subtract", "multiply",
-                                "divide", "percentage",
+                                "add",
+                                "subtract",
+                                "multiply",
+                                "divide",
+                                "percentage",
                             ],
                         },
                         "a": {"type": "NUMBER"},
@@ -621,7 +625,6 @@ agent_tools = [
                     "required": ["city"],
                 },
             },
-
             {
                 "name": "search_conversations",
                 "description": (
@@ -642,66 +645,101 @@ agent_tools = [
                         },
                         "limit": {
                             "type": "INTEGER",
-                            "description": "Maximum number of results, from 1 to 10.",
+                            "description": (
+                                "Maximum number of results, from 1 to 10."
+                            ),
                         },
                     },
                     "required": ["query"],
                 },
-            },  
-
-            {
-            "name": "semantic_conversation_search",
-            "description": (
-                "Search previous conversation history by semantic meaning. "
-                "Use this tool when the user asks about earlier discussions "
-                "but describes the topic using different words from the original "
-                "conversation. Prefer this tool when exact keyword matching may "
-                "miss relevant messages. Examples include asking about a feature "
-                "used to check city conditions when the original conversation "
-                "mentioned a weather tool. Do not use this tool for current weather."
-            ),
-            "parameters": {
-                "type": "OBJECT",
-                "properties": {
-                    "query": {
-                        "type": "STRING",
-                        "description": "The topic or question to search for in past conversations."
-                    },
-                    "limit": {
-                        "type": "INTEGER",
-                        "description": "Maximum number of results to return, from 1 to 10."
-                    }
-                },
-                "required": ["query"]
-            }
             },
             {
-            "name": "mcp_web_search",
-            "description": (
-                "Search the web through the connected MCP server. "
-                "Use this tool when the user requests current web "
-                "information or online research."
-            ),
-            "parameters": {
-                "type": "OBJECT",
-                "properties": {
-                    "query": {
-                        "type": "STRING",
-                        "description": "The search query."
+                "name": "semantic_conversation_search",
+                "description": (
+                    "Search previous conversation history by semantic meaning. "
+                    "Use this tool when the user asks about earlier discussions "
+                    "but describes the topic using different words from the original "
+                    "conversation. Prefer this tool when exact keyword matching may "
+                    "miss relevant messages. Examples include asking about a feature "
+                    "used to check city conditions when the original conversation "
+                    "mentioned a weather tool. Do not use this tool for current weather."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": (
+                                "The topic or question to search for in past conversations."
+                            ),
+                        },
+                        "limit": {
+                            "type": "INTEGER",
+                            "description": (
+                                "Maximum number of results to return, from 1 to 10."
+                            ),
+                        },
                     },
-                    "max_results": {
-                        "type": "INTEGER",
-                        "description": "Maximum results, from 1 to 5."
-                    }
+                    "required": ["query"],
                 },
-                "required": ["query"]
-            }
-            }
-           
+            },
+            {
+                "name": "mcp_web_search",
+                "description": (
+                    "Search the web through the connected MCP server. "
+                    "Use this tool when the user requests current web "
+                    "information or online research."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "The search query.",
+                        },
+                        "max_results": {
+                            "type": "INTEGER",
+                            "description": "Maximum results, from 1 to 5.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "search_pdf_documents",
+                "description": (
+                    "Search indexed PDF documents in ChromaDB for information "
+                    "relevant to the user's question. Returns matching text "
+                    "chunks with filenames and page numbers. Use this tool "
+                    "when the user asks about uploaded PDF documents, "
+                    "document contents, RFP requirements, compliance clauses, "
+                    "or information from an indexed PDF."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": (
+                                "The question or information to search for "
+                                "in indexed PDF documents."
+                            ),
+                        },
+                        "top_k": {
+                            "type": "INTEGER",
+                            "description": (
+                                "Number of relevant text chunks to retrieve, "
+                                "between 1 and 20."
+                            ),
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
         ]
-        
     }
 ]
+
 
 def semantic_conversation_search(query, limit=5):
     """Search past conversations by meaning."""
@@ -740,6 +778,16 @@ def execute_tool(name, arguments):
                 ),
             },
         ),
+        "search_pdf_documents": lambda args: call_mcp_tool(
+            "search_pdf_documents",
+            {
+                "query": args["query"],
+                "top_k": max(
+                    1, min(int(args.get("top_k", 5)), 20)
+                ),
+            },
+        ),
+        
         "search_conversations": lambda args: search_conversations(
             args["query"],
             limit=max(1, min(int(args.get("limit", 5)), 10)),
@@ -1078,21 +1126,17 @@ def semantic_conversation_search(query, limit=5):
 
     return results
 
+
 def emit_activity(activity_callback, event, message, details=None):
     """Send a real agent activity to the frontend when a callback exists."""
 
-    activity = {
-        "type": event,
-        "message": message,
-        "details": details,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-    }
-
     if activity_callback is not None:
         try:
-            activity_callback(activity)
+            activity_callback(event, message, details or {})
         except Exception as error:
             print(f"Activity callback error: {error}")
+
+
 
 
 def run_agent(user_input, conversation_id, activity_callback=None):
@@ -1116,13 +1160,16 @@ def run_agent(user_input, conversation_id, activity_callback=None):
         "Received user message.",
     )
 
-    for step in range(8):
+    for step in range(15):
         emit_activity(
             activity_callback,
             "thinking",
             f"Agent processing step {step + 1}.",
         )
 
+        response = None
+
+        # Retry temporary Gemini errors
         for attempt in range(3):
             try:
                 emit_activity(
@@ -1138,33 +1185,39 @@ def run_agent(user_input, conversation_id, activity_callback=None):
                     config=types.GenerateContentConfig(
                         tools=agent_tools,
                         system_instruction=(
-                            "You are a helpful AI agent with short-term conversation "
-                            "context, persistent SQLite conversation history, and "
-                            "persistent long-term memory. Use tools when appropriate. "
+                            "You are a helpful AI agent with short-term "
+                            "conversation context, persistent SQLite "
+                            "conversation history, and persistent long-term "
+                            "memory. Use tools when appropriate. "
 
-                            "When the user asks about previous discussions, earlier "
-                            "questions, past project work, decisions, or information "
-                            "that may not be present in the current conversation context, "
-                            "search the saved conversation history instead of guessing. "
+                            "When the user asks about previous discussions, "
+                            "earlier questions, past project work, decisions, "
+                            "or information that may not be present in the "
+                            "current conversation context, search saved "
+                            "conversation history instead of guessing. "
 
-                            "Choose semantic_conversation_search when the user describes "
-                            "a past topic using different wording or asks about its meaning. "
-                            "Choose search_conversations when exact keywords or phrases "
-                            "are available. Use the retrieved results to answer the user's "
-                            "question, and do not simply list search results unless asked. "
+                            "Choose semantic_conversation_search when the "
+                            "user describes a past topic using different "
+                            "wording or asks about its meaning. Choose "
+                            "search_conversations when exact keywords or "
+                            "phrases are available. Use retrieved results "
+                            "to answer the question; do not simply list "
+                            "search results unless asked. "
 
-                            "For questions about saved personal information, use "
-                            "semantic_memory_search if the wording differs from the stored "
-                            "memory. Use exact or keyword memory search when appropriate. "
+                            "For questions about saved personal information, "
+                            "use semantic_memory_search if the wording differs "
+                            "from stored memory. Use exact or keyword memory "
+                            "search when appropriate. "
 
-                            "Only claim knowledge of previous conversations when supported "
-                            "by the supplied context or retrieved search results. If the "
-                            "search results do not provide enough information, say so. "
+                            "Only claim knowledge of previous conversations "
+                            "when supported by context or retrieved results. "
+                            "If the results do not provide enough information, "
+                            "say so. "
 
-                            "Only save or delete information when explicitly asked. "
-                            "Never claim a tool succeeded if its result reports failure. "
-                            "If the user asks to delete a memory but the target is ambiguous, "
-                            "ask for clarification instead of deleting."
+                            "Only save or delete information when explicitly "
+                            "asked. Never claim a tool succeeded if its result "
+                            "reports failure. If a memory deletion target is "
+                            "ambiguous, ask for clarification."
                         ),
                     ),
                 )
@@ -1182,7 +1235,7 @@ def run_agent(user_input, conversation_id, activity_callback=None):
 
                 temporary_error = (
                     "503" in error_text
-                    or "UNAVAILABLE" in error_text
+                    or "UNAVAILABLE" in error_text.upper()
                 )
 
                 if temporary_error and attempt < 2:
@@ -1213,6 +1266,17 @@ def run_agent(user_input, conversation_id, activity_callback=None):
                     )
                     raise
 
+        if response is None:
+            message = "Gemini request failed after retries."
+
+            emit_activity(
+                activity_callback,
+                "error",
+                message,
+            )
+
+            return message
+
         if not response.candidates:
             message = "Gemini returned no response."
 
@@ -1225,8 +1289,10 @@ def run_agent(user_input, conversation_id, activity_callback=None):
             print("Agent: " + message)
             return message
 
+        # IMPORTANT: Add the model response to the SAME history
+        # that is passed to Gemini in the next iteration.
         model_content = response.candidates[0].content
-        conversation_history.append(model_content)
+        history.append(model_content)
 
         function_calls = [
             part.function_call
@@ -1234,13 +1300,18 @@ def run_agent(user_input, conversation_id, activity_callback=None):
             if part.function_call is not None
         ]
 
+        # If there are no tool calls, return the final answer
         if not function_calls:
             assistant_reply = (
                 response.text or "I couldn't generate a response."
             )
 
-            # Save the final assistant reply to SQLite
-            save_chat_message("model", assistant_reply, conversation_id)
+            # Store using "assistant"; ensure other code expects this role.
+            save_chat_message(
+                "assistant",
+                assistant_reply,
+                conversation_id,
+            )
 
             emit_activity(
                 activity_callback,
@@ -1256,7 +1327,6 @@ def run_agent(user_input, conversation_id, activity_callback=None):
         for call in function_calls:
             arguments = dict(call.args or {})
 
-            # Activity: tool selected
             print(f"\nTool selected: {call.name}")
 
             emit_activity(
@@ -1272,16 +1342,17 @@ def run_agent(user_input, conversation_id, activity_callback=None):
                 activity_callback,
                 "tool_arguments",
                 f"Arguments prepared for {call.name}.",
-                {"tool": call.name, "arguments": arguments},
+                {
+                    "tool": call.name,
+                    "arguments": arguments,
+                },
             )
 
-            # Execute the selected tool
             try:
                 result = execute_tool(call.name, arguments)
 
                 print(f"Tool result: {result}")
 
-                # Activity: tool completed
                 emit_activity(
                     activity_callback,
                     "tool_completed",
@@ -1294,9 +1365,18 @@ def run_agent(user_input, conversation_id, activity_callback=None):
                     activity_callback,
                     "tool_error",
                     f"Tool failed: {call.name}",
-                    {"tool": call.name, "error": str(error)},
+                    {
+                        "tool": call.name,
+                        "error": str(error),
+                    },
                 )
-                raise
+
+                # Return the error to Gemini so it can respond
+                # instead of abruptly terminating the whole agent.
+                result = {
+                    "error": str(error),
+                    "tool": call.name,
+                }
 
             if isinstance(result, str):
                 result_text = result
@@ -1314,14 +1394,19 @@ def run_agent(user_input, conversation_id, activity_callback=None):
                 )
             )
 
-        conversation_history.append(
+        # IMPORTANT: Add tool results to the SAME history.
+        # Gemini needs these results to decide what to do next.
+        history.append(
             types.Content(
                 role="user",
                 parts=function_response_parts,
             )
         )
 
-    message = "Maximum tool steps reached."
+    message = (
+        "Maximum tool steps reached. The agent could not finish "
+        "within 15 processing steps."
+    )
 
     emit_activity(
         activity_callback,
