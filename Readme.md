@@ -1,3 +1,5 @@
+<img width="1917" height="983" alt="image" src="https://github.com/user-attachments/assets/1c418dc2-7af5-4d0a-a1f4-116c5f3f8a34" />
+
 # AI Agent Tool Calling — RAG & MCP
 
 An AI-powered question-answering application that combines **Google Gemini, MCP tool integration, PDF Retrieval-Augmented Generation (RAG), FastAPI, React, ChromaDB, and SQLite**.
